@@ -3,6 +3,8 @@ package cmd
 import (
 	"fmt"
 	"os"
+	"syscall"
+	"time"
 
 	"cosmossdk.io/log"
 	"cosmossdk.io/store/metrics"
@@ -16,12 +18,21 @@ import (
 	"github.com/binaryholdings/cosmos-pruner/internal/rootmulti"
 )
 
-// load db
-// load app store and prune
-// if immutable tree is not deletable we should import and export current state
+const (
+	batchSize  = 1000 // numero versioni da potare per batch
+	minFreeGB  = 20   // GB minimi richiesti prima di procedere col batch
+)
+
+// Ottiene spazio disco libero in GB
+func getFreeDiskSpace(path string) (uint64, error) {
+	var stat syscall.Statfs_t
+	if err := syscall.Statfs(path, &stat); err != nil {
+		return 0, err
+	}
+	return (stat.Bavail * uint64(stat.Bsize)) / (1024 * 1024 * 1024), nil
+}
 
 func PruneAppState(dataDir string) error {
-
 	o := opt.Options{
 		DisableSeeksCompaction: true,
 	}
@@ -31,7 +42,7 @@ func PruneAppState(dataDir string) error {
 		return err
 	}
 
-	fmt.Println("pruning application state")
+	fmt.Println("Pruning application state...")
 
 	appStore := rootmulti.NewStore(appDB, log.NewLogger(os.Stderr), metrics.NewNoOpMetrics())
 	ver := rootmulti.GetLatestVersion(appDB)
@@ -44,13 +55,10 @@ func PruneAppState(dataDir string) error {
 		}
 
 		for _, storeInfo := range cInfo.StoreInfos {
-			// we only want to prune the stores with actual data.
-			// sometimes in-memory stores get leaked to disk without data.
-			// if that happens, the store's computed hash is empty as well.
 			if len(storeInfo.CommitId.Hash) > 0 {
 				storeNames = append(storeNames, storeInfo.Name)
 			} else {
-				fmt.Println("skipping", storeInfo.Name, "store due to empty hash")
+				fmt.Println("Skipping", storeInfo.Name, "store due to empty hash")
 			}
 		}
 	}
@@ -60,34 +68,55 @@ func PruneAppState(dataDir string) error {
 		appStore.MountStoreWithDB(value, types.StoreTypeIAVL, nil)
 	}
 
-	err = appStore.LoadLatestVersion()
-	if err != nil {
+	if err := appStore.LoadLatestVersion(); err != nil {
 		return err
 	}
 
 	versions := appStore.GetAllVersions()
+	totalVersions := int64(len(versions))
+	numToPrune := totalVersions - int64(keepVersions)
 
-	v64 := make([]int64, len(versions))
-	for i := 0; i < len(versions); i++ {
-		v64[i] = int64(versions[i])
+	if numToPrune <= 0 {
+		fmt.Println("No versions to prune.")
+		return nil
 	}
 
-	fmt.Println(len(v64))
+	fmt.Printf("Total versions to prune: %d\n", numToPrune)
 
-	appStore.PruneStores(int64(len(v64)) - int64(keepVersions))
+	pruned := int64(0)
+	for pruned < numToPrune {
+		freeSpace, err := getFreeDiskSpace(dataDir)
+		if err != nil {
+			return fmt.Errorf("errore nel controllo spazio disco: %w", err)
+		}
+		if freeSpace < minFreeGB {
+			return fmt.Errorf("spazio insufficiente sul disco (%d GB disponibili)", freeSpace)
+		}
 
-	fmt.Println("compacting application state")
-	if err := appDB.ForceCompact(nil, nil); err != nil {
-		return err
+		remaining := numToPrune - pruned
+		thisBatch := batchSize
+		if remaining < int64(batchSize) {
+			thisBatch = int(remaining)
+		}
+
+		fmt.Printf("Pruning batch of %d versions... (progress: %d/%d)\n", thisBatch, pruned+int64(thisBatch), numToPrune)
+		appStore.PruneStores(thisBatch)
+		pruned += int64(thisBatch)
+
+		fmt.Println("Compacting after batch...")
+		if err := appDB.Compact(nil, nil); err != nil {
+			return fmt.Errorf("errore durante la compattazione: %w", err)
+		}
+
+		time.Sleep(1 * time.Second)
 	}
 
-	//create a new app store
+	fmt.Println("Application state pruning complete.")
 	return nil
 }
 
 // PruneCmtData prunes the cometbft blocks and state based on the amount of blocks to keep
 func PruneCmtData(dataDir string) error {
-
 	o := opt.Options{
 		DisableSeeksCompaction: true,
 	}
@@ -108,7 +137,6 @@ func PruneCmtData(dataDir string) error {
 	stateStore := state.NewStore(stateDB, state.StoreOptions{})
 
 	base := blockStore.Base()
-
 	pruneHeight := blockStore.Height() - int64(keepBlocks)
 
 	state, err := stateStore.Load()
@@ -116,29 +144,28 @@ func PruneCmtData(dataDir string) error {
 		return err
 	}
 
-	fmt.Println("pruning block store")
-	// prune block store
+	fmt.Println("Pruning block store...")
 	_, evidencePoint, err := blockStore.PruneBlocks(pruneHeight, state)
 	if err != nil {
 		return err
 	}
 
-	fmt.Println("compacting block store")
+	fmt.Println("Compacting block store...")
 	if err := blockStoreDB.Compact(nil, nil); err != nil {
 		return err
 	}
 
-	fmt.Println("pruning state store")
-	// prune state store
+	fmt.Println("Pruning state store...")
 	err = stateStore.PruneStates(base, pruneHeight, evidencePoint)
 	if err != nil {
 		return err
 	}
 
-	fmt.Println("compacting state store")
+	fmt.Println("Compacting state store...")
 	if err := stateDB.Compact(nil, nil); err != nil {
 		return err
 	}
 
+	fmt.Println("CometBFT pruning complete.")
 	return nil
 }
