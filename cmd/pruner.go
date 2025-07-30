@@ -13,19 +13,16 @@ import (
 	"github.com/cometbft/cometbft/state"
 	cmtstore "github.com/cometbft/cometbft/store"
 	db "github.com/cosmos/cosmos-db"
-	"github.com/syndtr/goleveldb/leveldb/cache"
 	"github.com/syndtr/goleveldb/leveldb/opt"
 
-	// Questo import potrebbe dover essere adattato al percorso esatto del tuo fork
-	// Assumiamo che il tuo `internal/rootmulti` sia l'implementazione della `rootmulti.Store` del SDK
+	// Import corretto per il pacchetto rootmulti locale
+	"github.com/binaryholdings/cosmos-pruner/internal/rootmulti"
 )
 
-// Costanti
 const (
-	minFreeGB = 20 // Spazio disco minimo richiesto (in GB) prima di iniziare la compattazione
+	minFreeGB = 20
 )
 
-// getFreeDiskSpace ottiene lo spazio libero su disco in GB.
 func getFreeDiskSpace(path string) (uint64, error) {
 	var stat syscall.Statfs_t
 	if err := syscall.Statfs(path, &stat); err != nil {
@@ -34,14 +31,11 @@ func getFreeDiskSpace(path string) (uint64, error) {
 	return (stat.Bavail * uint64(stat.Bsize)) / (1024 * 1024 * 1024), nil
 }
 
-// PruneAppState esegue il pruning dello stato dell'applicazione usando la logica parallela.
-// Se noCompact è true, salta la fase di compattazione fisica del database.
-// Se parallel è true, usa la funzione di pruning parallelo.
+// Firma della funzione aggiornata per usare uint64
 func PruneAppState(dataDir string, keepVersions uint64, noCompact, parallel bool) error {
+	// Opzioni di LevelDB semplificate per compatibilità
 	o := opt.Options{
 		DisableSeeksCompaction: true,
-		WriteBufferSize:        128 * opt.MiB,
-		BlockCache:             cache.NewLRUCache(512 * opt.MiB),
 	}
 
 	appDB, err := db.NewGoLevelDBWithOpts("application", dataDir, &o)
@@ -61,13 +55,8 @@ func PruneAppState(dataDir string, keepVersions uint64, noCompact, parallel bool
 		fmt.Println("Using sequential pruning strategy.")
 	}
 
-	// Questo deve essere un cast al tipo di store che hai nella tua codebase.
-	// Se la tua `PruneStoresParallel` è un metodo su `rootmulti.Store`, questo è corretto.
-	// Altrimenti potrebbe essere necessario un cast diverso. Assumiamo che `appStore`
-	// sia il tipo che implementa PruneStores e PruneStoresParallel.
 	appStore := rootmulti.NewStore(appDB, log.NewLogger(os.Stderr), metrics.NewNoOpMetrics())
 
-	// Caricamento degli store (codice boilerplate)
 	ver := rootmulti.GetLatestVersion(appDB)
 	storeNames := []string{}
 	if ver != 0 {
@@ -91,41 +80,34 @@ func PruneAppState(dataDir string, keepVersions uint64, noCompact, parallel bool
 		return err
 	}
 
-	// Logica di pruning principale
-	versions := appStore.GetAllVersions() // Questa funzione deve restituire []int o []uint64, ordinati
+	versions := appStore.GetAllVersions()
 	if len(versions) == 0 {
 		fmt.Println("No versions found to prune.")
 		return nil
 	}
 
-	if uint(len(versions)) <= keepVersions {
+	if uint64(len(versions)) <= keepVersions {
 		fmt.Println("No versions to prune.")
 		return nil
 	}
 
 	numToPrune := len(versions) - int(keepVersions)
-	// L'altezza fino a cui potare è l'ultima versione nell'elenco di quelle da eliminare.
-	// versions[0] è la più vecchia, versions[len-1] la più nuova.
 	pruningHeight := int64(versions[numToPrune-1])
 
 	fmt.Printf("Pruning all versions up to height %d...\n", pruningHeight)
 
 	startTime := time.Now()
 	if parallel {
-		// Chiama la nuova funzione parallela
 		if err := appStore.PruneStoresParallel(pruningHeight); err != nil {
 			return fmt.Errorf("error during parallel pruning: %w", err)
 		}
 	} else {
-		// Chiama la funzione sequenziale originale
 		if err := appStore.PruneStores(pruningHeight); err != nil {
 			return fmt.Errorf("error during sequential pruning: %w", err)
 		}
 	}
 	fmt.Printf("Logical pruning finished in %s.\n", time.Since(startTime))
 
-
-	// Logica di compattazione (invariata)
 	if !noCompact {
 		fmt.Println("Checking for available disk space before compaction...")
 		freeSpace, err := getFreeDiskSpace(dataDir)
@@ -149,7 +131,7 @@ func PruneAppState(dataDir string, keepVersions uint64, noCompact, parallel bool
 	return nil
 }
 
-// PruneCmtData rimane invariato.
+// Firma della funzione aggiornata per usare uint64
 func PruneCmtData(dataDir string, keepBlocks uint64) error {
 	o := opt.Options{
 		DisableSeeksCompaction: true,
