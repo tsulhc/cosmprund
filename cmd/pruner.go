@@ -41,6 +41,7 @@ func PruneAppState(dataDir string) error {
 	if err != nil {
 		return err
 	}
+	defer appDB.Close() // È buona norma chiudere il DB quando la funzione termina
 
 	fmt.Println("Pruning application state...")
 
@@ -74,6 +75,9 @@ func PruneAppState(dataDir string) error {
 
 	versions := appStore.GetAllVersions()
 	totalVersions := int64(len(versions))
+
+	// Assicurati che keepVersions sia definito globalmente o passato come parametro
+	// In questo esempio, assumo che sia una costante o una variabile globale
 	numToPrune := totalVersions - int64(keepVersions)
 
 	if numToPrune <= 0 {
@@ -90,7 +94,7 @@ func PruneAppState(dataDir string) error {
 			return fmt.Errorf("errore nel controllo spazio disco: %w", err)
 		}
 		if freeSpace < minFreeGB {
-			return fmt.Errorf("spazio insufficiente sul disco (%d GB disponibili)", freeSpace)
+			return fmt.Errorf("spazio insufficiente sul disco (%d GB disponibili, richiesti %d GB)", freeSpace, minFreeGB)
 		}
 
 		remaining := numToPrune - pruned
@@ -100,11 +104,15 @@ func PruneAppState(dataDir string) error {
 		}
 
 		fmt.Printf("Pruning batch of %d versions... (progress: %d/%d)\n", thisBatch, pruned+int64(thisBatch), numToPrune)
-		appStore.PruneStores(thisBatch)
+
+		// CORREZIONE 1: Converti thisBatch in int64
+		appStore.PruneStores(int64(thisBatch))
 		pruned += int64(thisBatch)
 
 		fmt.Println("Compacting after batch...")
-		if err := appDB.Compact(nil, nil); err != nil {
+
+		// CORREZIONE 2: Usa ForceCompact invece di Compact
+		if err := appDB.ForceCompact(nil, nil); err != nil {
 			return fmt.Errorf("errore durante la compattazione: %w", err)
 		}
 
