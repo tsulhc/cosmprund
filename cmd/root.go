@@ -81,7 +81,7 @@ func NewRootCmd() *cobra.Command {
 		panic(err)
 	}
 
-	pruneCmd.PersistentFlags().BoolVar(¶llel, "parallel", false, "Enable parallel pruning for the application state")
+	pruneCmd.PersistentFlags().BoolVar(&parallel, "parallel", false, "Enable parallel pruning for the application state")
 	if err := viper.BindPFlag("parallel", pruneCmd.PersistentFlags().Lookup("parallel")); err != nil {
 		panic(err)
 	}
