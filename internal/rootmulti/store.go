@@ -81,6 +81,90 @@ var (
 	_ types.Queryable        = (*Store)(nil)
 )
 
+func (rs *Store) PruneStoresParallel(numToPrune int64) error {
+	if numToPrune <= 0 {
+		return nil
+	}
+
+	fmt.Println("Starting parallel pruning...")
+
+	// 1. Ottieni le versioni da eliminare
+	versions := rs.GetAllVersions()
+	if int64(len(versions)) <= numToPrune {
+		// Non eliminare tutto, lascia almeno una versione
+		numToPrune = int64(len(versions) - 1)
+	}
+	if numToPrune <= 0 {
+		return nil
+	}
+	versionsToPrune := versions[:numToPrune]
+
+	// 2. Prepara la parallelizzazione
+	var wg sync.WaitGroup
+	// Limita il numero di goroutine per non sovraccaricare il sistema I/O
+	// Un buon punto di partenza è il numero di CPU.
+	// workerPool := make(chan struct{}, runtime.NumCPU())
+
+	// In questo esempio usiamo un WaitGroup semplice per chiarezza.
+
+	errs := make(chan error, len(rs.stores)) // Canale per raccogliere errori
+
+	// 3. Avvia una goroutine per ogni store
+	for name, store := range rs.stores {
+		wg.Add(1)
+
+		go func(storeName string, s store) {
+			defer wg.Done()
+
+			iavlStore, ok := s.(*iavlStore)
+			if !ok {
+				// Salta gli store che non sono IAVL (es. transient, memory)
+				return
+			}
+
+			tree := iavlStore.Tree()
+
+			// 4. Ogni goroutine elimina le versioni per il suo albero
+			fmt.Printf("Pruning store %s...\n", storeName)
+			for _, v := range versionsToPrune {
+				err := tree.DeleteVersion(v)
+				if err != nil {
+					// Invia l'errore al canale e interrompi
+					errs <- fmt.Errorf("error pruning version %d from store %s: %w", v, storeName, err)
+					return
+				}
+			}
+		}(name, store)
+	}
+
+	// 5. Attendi il completamento di tutte le goroutine
+	wg.Wait()
+	close(errs)
+
+	// Controlla se ci sono stati errori
+	for err := range errs {
+		if err != nil {
+			return err // Restituisce il primo errore incontrato
+		}
+	}
+
+	// 6. Elimina i metadati delle versioni (commit infos) dallo store radice
+	for _, v := range versionsToPrune {
+		if err := rs.DeleteCommitInfo(v); err != nil {
+			return fmt.Errorf("failed to delete commit info for version %d: %w", v, err)
+		}
+	}
+
+	fmt.Printf("Successfully pruned %d versions in parallel.\n", len(versionsToPrune))
+	return nil
+}
+
+// Helper per eliminare il commit info (potrebbe già esistere o essere privato)
+func (rs *Store) DeleteCommitInfo(version uint64) error {
+	key := SSUInt64(version)
+	return rs.db.Delete(key)
+}
+
 // NewStore returns a reference to a new Store object with the provided DB. The
 // store will be created with a PruneNothing pruning strategy by default. After
 // a store is created, KVStores must be mounted and finally LoadLatestVersion or

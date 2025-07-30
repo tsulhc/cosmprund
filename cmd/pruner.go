@@ -32,16 +32,20 @@ func getFreeDiskSpace(path string) (uint64, error) {
 	return (stat.Bavail * uint64(stat.Bsize)) / (1024 * 1024 * 1024), nil
 }
 
-func PruneAppState(dataDir string) error {
+// PruneAppState esegue il pruning dello stato dell'applicazione in modo efficiente e robusto.
+func PruneAppState(dataDir string, keepVersions uint) error {
+	// Tuning dei parametri di GoLevelDB per prestazioni migliori
 	o := opt.Options{
 		DisableSeeksCompaction: true,
+		WriteBufferSize:        128 * opt.MiB, // Aumenta il buffer di scrittura a 128MB
+		BlockCache:             cache.NewLRUCache(512 * opt.MiB), // Usa una cache LRU di 512MB
 	}
 
 	appDB, err := db.NewGoLevelDBWithOpts("application", dataDir, &o)
 	if err != nil {
 		return err
 	}
-	defer appDB.Close() // È buona norma chiudere il DB quando la funzione termina
+	defer appDB.Close()
 
 	fmt.Println("Pruning application state...")
 
@@ -75,9 +79,6 @@ func PruneAppState(dataDir string) error {
 
 	versions := appStore.GetAllVersions()
 	totalVersions := int64(len(versions))
-
-	// Assicurati che keepVersions sia definito globalmente o passato come parametro
-	// In questo esempio, assumo che sia una costante o una variabile globale
 	numToPrune := totalVersions - int64(keepVersions)
 
 	if numToPrune <= 0 {
@@ -88,35 +89,38 @@ func PruneAppState(dataDir string) error {
 	fmt.Printf("Total versions to prune: %d\n", numToPrune)
 
 	pruned := int64(0)
+	batchesSinceLastCompact := 0
+
 	for pruned < numToPrune {
 		freeSpace, err := getFreeDiskSpace(dataDir)
 		if err != nil {
-			return fmt.Errorf("errore nel controllo spazio disco: %w", err)
+			return fmt.Errorf("error checking disk space: %w", err)
 		}
 		if freeSpace < minFreeGB {
-			return fmt.Errorf("spazio insufficiente sul disco (%d GB disponibili, richiesti %d GB)", freeSpace, minFreeGB)
+			return fmt.Errorf("insufficient disk space (%d GB available, %d GB required)", freeSpace, minFreeGB)
 		}
 
 		remaining := numToPrune - pruned
-		thisBatch := batchSize
-		if remaining < int64(batchSize) {
-			thisBatch = int(remaining)
+		thisBatch := int64(batchSize)
+		if remaining < batchSize {
+			thisBatch = remaining
 		}
 
-		fmt.Printf("Pruning batch of %d versions... (progress: %d/%d)\n", thisBatch, pruned+int64(thisBatch), numToPrune)
+		fmt.Printf("Pruning batch of %d versions... (Total progress: %d/%d)\n", thisBatch, pruned+thisBatch, numToPrune)
+		appStore.PruneStores(thisBatch)
+		pruned += thisBatch
+		batchesSinceLastCompact++
 
-		// CORREZIONE 1: Converti thisBatch in int64
-		appStore.PruneStores(int64(thisBatch))
-		pruned += int64(thisBatch)
-
-		fmt.Println("Compacting after batch...")
-
-		// CORREZIONE 2: Usa ForceCompact invece di Compact
-		if err := appDB.ForceCompact(nil, nil); err != nil {
-			return fmt.Errorf("errore durante la compattazione: %w", err)
+		isLastLoop := (numToPrune - pruned) == 0
+		if batchesSinceLastCompact >= compactAfterNBatch || isLastLoop {
+			fmt.Println("Compacting database... This might take a while.")
+			startTime := time.Now()
+			if err := appDB.ForceCompact(nil, nil); err != nil {
+				return fmt.Errorf("error during compaction: %w", err)
+			}
+			fmt.Printf("Compaction finished in %s.\n", time.Since(startTime))
+			batchesSinceLastCompact = 0 // Reset counter
 		}
-
-		time.Sleep(1 * time.Second)
 	}
 
 	fmt.Println("Application state pruning complete.")
