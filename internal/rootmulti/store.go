@@ -1,6 +1,7 @@
 package rootmulti
 
 import (
+	"encoding/binary"
 	"crypto/sha256"
 	"errors"
 	"fmt"
@@ -88,16 +89,15 @@ func SSUInt64(i uint64) []byte {
 }
 
 
+// PruneStoresParallel esegue il pruning delle versioni in parallelo per ogni sub-store.
+// VERSIONE FINALE CORRETTA
 func (rs *Store) PruneStoresParallel(numToPrune int64) error {
 	if numToPrune <= 0 {
 		return nil
 	}
 
-	rs.mtx.Lock()
-	defer rs.mtx.Unlock()
+	// CORREZIONE: Rimosso il lock/unlock di rs.mtx
 
-	// 1. Ottieni le versioni da eliminare (le più vecchie)
-	// La funzione GetAllVersions() in questo fork restituisce []int.
 	versions := rs.GetAllVersions()
 	if int64(len(versions)) <= numToPrune {
 		numToPrune = int64(len(versions) - 1)
@@ -107,42 +107,37 @@ func (rs *Store) PruneStoresParallel(numToPrune int64) error {
 	}
 	versionsToPrune := versions[:numToPrune]
 
-	// 2. Prepara la parallelizzazione
 	var wg sync.WaitGroup
 	errs := make(chan error, len(rs.stores))
 
-	// 3. Avvia una goroutine per ogni sub-store
-	// CORREZIONE: Iteriamo su `rs.stores` ottenendo la chiave (types.StoreKey) e il valore (types.Store)
 	for key, store := range rs.stores {
 		wg.Add(1)
 
-		// CORREZIONE: La goroutine accetta i tipi corretti
 		go func(storeKey types.StoreKey, s types.Store) {
 			defer wg.Done()
 
-			// CORREZIONE: Otteniamo il nome dalla chiave
 			storeName := storeKey.Name()
 
-			iavlStore, ok := s.(*iavlStore)
+			// CORREZIONE: Il tipo corretto per il type-assertion è `*Store` (dal pacchetto corrente),
+			// che è l'implementazione concreta dello store IAVL in questo fork.
+			concreteStore, ok := s.(*Store)
 			if !ok {
-				// Salta gli store che non sono IAVL
+				// Salta gli store che non sono del tipo che ci aspettiamo (es. store in memoria)
 				return
 			}
 
-			tree := iavlStore.Tree()
+			// Ora possiamo accedere al metodo Tree() del tipo concreto
+			tree := concreteStore.Tree()
 
-			// Ogni goroutine elimina le versioni per il suo albero
 			for _, v := range versionsToPrune {
-				// La funzione DeleteVersion di IAVL accetta int64, e `v` è `int`, quindi va bene.
 				if err := tree.DeleteVersion(int64(v)); err != nil {
 					errs <- fmt.Errorf("error pruning version %d from store %s: %w", v, storeName, err)
 					return
 				}
 			}
-		}(key, store) // Passiamo la chiave e il valore del loop
+		}(key, store)
 	}
 
-	// 4. Attendi il completamento
 	wg.Wait()
 	close(errs)
 
@@ -152,9 +147,7 @@ func (rs *Store) PruneStoresParallel(numToPrune int64) error {
 		}
 	}
 
-	// 5. Elimina i metadati delle versioni
 	for _, v := range versionsToPrune {
-		// CORREZIONE: Facciamo il cast di `v` (che è `int`) a `uint64` per la funzione
 		if err := rs.DeleteCommitInfo(uint64(v)); err != nil {
 			return fmt.Errorf("failed to delete commit info for version %d: %w", v, err)
 		}
