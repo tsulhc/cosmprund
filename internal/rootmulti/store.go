@@ -127,7 +127,7 @@ func (rs *Store) PruneStoresParallel(numToPrune int64) error {
 			}
 
 			// Ora possiamo accedere al metodo Tree() del tipo concreto
-			tree := concreteStore.Tree()
+			tree := concreteStore.tree
 
 			for _, v := range versionsToPrune {
 				if err := tree.DeleteVersion(int64(v)); err != nil {
