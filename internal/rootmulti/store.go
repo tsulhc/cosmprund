@@ -81,17 +81,25 @@ var (
 	_ types.Queryable        = (*Store)(nil)
 )
 
+func SSUInt64(i uint64) []byte {
+	b := make([]byte, 8)
+	binary.BigEndian.PutUint64(b, i)
+	return b
+}
+
+
 func (rs *Store) PruneStoresParallel(numToPrune int64) error {
 	if numToPrune <= 0 {
 		return nil
 	}
 
-	fmt.Println("Starting parallel pruning...")
+	rs.mtx.Lock()
+	defer rs.mtx.Unlock()
 
-	// 1. Ottieni le versioni da eliminare
+	// 1. Ottieni le versioni da eliminare (le più vecchie)
+	// La funzione GetAllVersions() in questo fork restituisce []int.
 	versions := rs.GetAllVersions()
 	if int64(len(versions)) <= numToPrune {
-		// Non eliminare tutto, lascia almeno una versione
 		numToPrune = int64(len(versions) - 1)
 	}
 	if numToPrune <= 0 {
@@ -101,66 +109,64 @@ func (rs *Store) PruneStoresParallel(numToPrune int64) error {
 
 	// 2. Prepara la parallelizzazione
 	var wg sync.WaitGroup
-	// Limita il numero di goroutine per non sovraccaricare il sistema I/O
-	// Un buon punto di partenza è il numero di CPU.
-	// workerPool := make(chan struct{}, runtime.NumCPU())
+	errs := make(chan error, len(rs.stores))
 
-	// In questo esempio usiamo un WaitGroup semplice per chiarezza.
-
-	errs := make(chan error, len(rs.stores)) // Canale per raccogliere errori
-
-	// 3. Avvia una goroutine per ogni store
-	for name, store := range rs.stores {
+	// 3. Avvia una goroutine per ogni sub-store
+	// CORREZIONE: Iteriamo su `rs.stores` ottenendo la chiave (types.StoreKey) e il valore (types.Store)
+	for key, store := range rs.stores {
 		wg.Add(1)
 
-		go func(storeName string, s store) {
+		// CORREZIONE: La goroutine accetta i tipi corretti
+		go func(storeKey types.StoreKey, s types.Store) {
 			defer wg.Done()
+
+			// CORREZIONE: Otteniamo il nome dalla chiave
+			storeName := storeKey.Name()
 
 			iavlStore, ok := s.(*iavlStore)
 			if !ok {
-				// Salta gli store che non sono IAVL (es. transient, memory)
+				// Salta gli store che non sono IAVL
 				return
 			}
 
 			tree := iavlStore.Tree()
 
-			// 4. Ogni goroutine elimina le versioni per il suo albero
-			fmt.Printf("Pruning store %s...\n", storeName)
+			// Ogni goroutine elimina le versioni per il suo albero
 			for _, v := range versionsToPrune {
-				err := tree.DeleteVersion(v)
-				if err != nil {
-					// Invia l'errore al canale e interrompi
+				// La funzione DeleteVersion di IAVL accetta int64, e `v` è `int`, quindi va bene.
+				if err := tree.DeleteVersion(int64(v)); err != nil {
 					errs <- fmt.Errorf("error pruning version %d from store %s: %w", v, storeName, err)
 					return
 				}
 			}
-		}(name, store)
+		}(key, store) // Passiamo la chiave e il valore del loop
 	}
 
-	// 5. Attendi il completamento di tutte le goroutine
+	// 4. Attendi il completamento
 	wg.Wait()
 	close(errs)
 
-	// Controlla se ci sono stati errori
 	for err := range errs {
 		if err != nil {
-			return err // Restituisce il primo errore incontrato
+			return err
 		}
 	}
 
-	// 6. Elimina i metadati delle versioni (commit infos) dallo store radice
+	// 5. Elimina i metadati delle versioni
 	for _, v := range versionsToPrune {
-		if err := rs.DeleteCommitInfo(v); err != nil {
+		// CORREZIONE: Facciamo il cast di `v` (che è `int`) a `uint64` per la funzione
+		if err := rs.DeleteCommitInfo(uint64(v)); err != nil {
 			return fmt.Errorf("failed to delete commit info for version %d: %w", v, err)
 		}
 	}
 
-	fmt.Printf("Successfully pruned %d versions in parallel.\n", len(versionsToPrune))
 	return nil
 }
 
-// Helper per eliminare il commit info (potrebbe già esistere o essere privato)
+// Assicurati che anche questa funzione esista nel file e abbia la firma corretta.
+// In base agli errori, si aspetta un uint64.
 func (rs *Store) DeleteCommitInfo(version uint64) error {
+	// CORREZIONE: Usiamo la nostra funzione helper SSUInt64
 	key := SSUInt64(version)
 	return rs.db.Delete(key)
 }
