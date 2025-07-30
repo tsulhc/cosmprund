@@ -18,6 +18,8 @@ var (
 	cometbft     bool
 	keepBlocks   uint64
 	keepVersions uint64
+	noCompact    bool // *** MODIFICA: Aggiunta variabile per il flag --no-compact ***
+	parallel     bool // *** MODIFICA: Aggiunta variabile per il flag --parallel ***
 	appName      = "cosmprund"
 )
 
@@ -36,13 +38,15 @@ func NewRootCmd() *cobra.Command {
 			dataDir := args[0]
 
 			if cosmosSdk {
-				if err := PruneAppState(dataDir); err != nil {
+				// *** MODIFICA: Passa i nuovi flag alla funzione PruneAppState ***
+				if err := PruneAppState(dataDir, keepVersions, noCompact, parallel); err != nil {
 					return err
 				}
 			}
 
 			if cometbft {
-				if err := PruneCmtData(dataDir); err != nil {
+				// *** MODIFICA: Passa keepBlocks alla funzione PruneCmtData ***
+				if err := PruneCmtData(dataDir, keepBlocks); err != nil {
 					return err
 				}
 			}
@@ -74,6 +78,18 @@ func NewRootCmd() *cobra.Command {
 	// --cometbft flag
 	pruneCmd.PersistentFlags().BoolVar(&cometbft, "cometbft", true, "set to false you dont want to prune cometbft data")
 	if err := viper.BindPFlag("cometbft", pruneCmd.PersistentFlags().Lookup("cometbft")); err != nil {
+		panic(err)
+	}
+
+	// *** MODIFICA: Definizione del flag --no-compact ***
+	pruneCmd.PersistentFlags().BoolVar(&noCompact, "no-compact", false, "Disable database compaction after pruning application state")
+	if err := viper.BindPFlag("no-compact", pruneCmd.PersistentFlags().Lookup("no-compact")); err != nil {
+		panic(err)
+	}
+
+	// *** MODIFICA: Definizione del flag --parallel ***
+	pruneCmd.PersistentFlags().BoolVar(¶llel, "parallel", false, "Enable parallel pruning for the application state")
+	if err := viper.BindPFlag("parallel", pruneCmd.PersistentFlags().Lookup("parallel")); err != nil {
 		panic(err)
 	}
 

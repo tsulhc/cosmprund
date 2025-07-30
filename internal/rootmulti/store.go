@@ -91,49 +91,50 @@ func SSUInt64(i uint64) []byte {
 
 // PruneStoresParallel esegue il pruning delle versioni in parallelo per ogni sub-store.
 // VERSIONE FINALE CORRETTA
-func (rs *Store) PruneStoresParallel(numToPrune int64) error {
-	if numToPrune <= 0 {
+func (rs *Store) PruneStoresParallel(pruningHeight int64) error {
+	if pruningHeight <= 0 {
+		rs.logger.Debug("parallel pruning skipped, height is less than or equal to 0")
 		return nil
 	}
 
-	// CORREZIONE: Rimosso il lock/unlock di rs.mtx
-
-	versions := rs.GetAllVersions()
-	if int64(len(versions)) <= numToPrune {
-		numToPrune = int64(len(versions) - 1)
-	}
-	if numToPrune <= 0 {
-		return nil
-	}
-	versionsToPrune := versions[:numToPrune]
+	rs.logger.Debug("starting parallel pruning", "prune_to_height", pruningHeight)
 
 	var wg sync.WaitGroup
 	errs := make(chan error, len(rs.stores))
 
 	for key, store := range rs.stores {
+		// Controlliamo il tipo di store prima di avviare la goroutine
+		if store.GetStoreType() != types.StoreTypeIAVL {
+			continue
+		}
+
 		wg.Add(1)
 
 		go func(storeKey types.StoreKey, s types.Store) {
 			defer wg.Done()
 
-			storeName := storeKey.Name()
+			// Replicando la logica di unwrapping/accesso
+			kvStore := rs.GetCommitKVStore(storeKey)
 
-			// CORREZIONE: Il tipo corretto per il type-assertion è `*Store` (dal pacchetto corrente),
-			// che è l'implementazione concreta dello store IAVL in questo fork.
-			concreteStore, ok := s.(*Store)
+			// Facciamo l'assertion a *iavl.Store come nella funzione originale
+			iavlStore, ok := kvStore.(*iavl.Store)
 			if !ok {
-				// Salta gli store che non sono del tipo che ci aspettiamo (es. store in memoria)
+				// Questo non dovrebbe accadere se GetStoreType() è IAVL, ma è un controllo sicuro.
+				errs <- fmt.Errorf("store %s is not of type *iavl.Store after GetCommitKVStore", storeKey.Name())
 				return
 			}
 
-			// Ora possiamo accedere al metodo Tree() del tipo concreto
-			tree := concreteStore.tree
-
-			for _, v := range versionsToPrune {
-				if err := tree.DeleteVersion(int64(v)); err != nil {
-					errs <- fmt.Errorf("error pruning version %d from store %s: %w", v, storeName, err)
+			// Usiamo il metodo corretto: DeleteVersionsTo
+			err := iavlStore.DeleteVersionsTo(pruningHeight)
+			if err != nil {
+				// Controlliamo l'errore specifico come nella funzione originale
+				if errors.Is(err, iavltree.ErrVersionDoesNotExist) {
+					// Questo non è un errore fatale, ma potremmo volerlo loggare.
+					// In un contesto parallelo, potremmo semplicemente ignorarlo.
 					return
 				}
+				// Invia l'errore al canale
+				errs <- fmt.Errorf("failed to parallel prune store %s: %w", storeKey.Name(), err)
 			}
 		}(key, store)
 	}
@@ -141,18 +142,15 @@ func (rs *Store) PruneStoresParallel(numToPrune int64) error {
 	wg.Wait()
 	close(errs)
 
+	// Controlla se una delle goroutine ha riportato un errore fatale
 	for err := range errs {
 		if err != nil {
-			return err
+			rs.logger.Error("an error occurred during parallel pruning", "err", err)
+			return err // Restituisce il primo errore incontrato
 		}
 	}
 
-	for _, v := range versionsToPrune {
-		if err := rs.DeleteCommitInfo(uint64(v)); err != nil {
-			return fmt.Errorf("failed to delete commit info for version %d: %w", v, err)
-		}
-	}
-
+	rs.logger.Debug("parallel pruning finished successfully")
 	return nil
 }
 
