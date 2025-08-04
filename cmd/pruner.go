@@ -15,11 +15,13 @@ import (
 	db "github.com/cosmos/cosmos-db"
 	"github.com/syndtr/goleveldb/leveldb/opt"
 
-	// Import corretto per il pacchetto rootmulti locale
 	"github.com/binaryholdings/cosmos-pruner/internal/rootmulti"
 )
 
 const (
+	// Dimensione del batch, puoi regolarla. Un valore più piccolo è più sicuro per lo spazio,
+	// ma potrebbe rendere il processo totale leggermente più lento.
+	batchSize = 1000
 	minFreeGB = 20
 )
 
@@ -31,9 +33,11 @@ func getFreeDiskSpace(path string) (uint64, error) {
 	return (stat.Bavail * uint64(stat.Bsize)) / (1024 * 1024 * 1024), nil
 }
 
-// Firma della funzione aggiornata per usare uint64
+// PruneAppState esegue il pruning dello stato dell'applicazione.
+// Il comportamento di default è un ciclo a batch sicuro che pota e compatta.
+// --no-compact bypassa questo ciclo ed esegue solo il pruning logico in un'unica passata.
+// --parallel accelera il pruning logico all'interno di ogni batch.
 func PruneAppState(dataDir string, keepVersions uint64, noCompact, parallel bool) error {
-	// Opzioni di LevelDB semplificate per compatibilità
 	o := opt.Options{
 		DisableSeeksCompaction: true,
 	}
@@ -44,19 +48,8 @@ func PruneAppState(dataDir string, keepVersions uint64, noCompact, parallel bool
 	}
 	defer appDB.Close()
 
-	if noCompact {
-		fmt.Println("Pruning application state (compaction disabled)...")
-	} else {
-		fmt.Println("Pruning and compacting application state...")
-	}
-	if parallel {
-		fmt.Println("Using parallel pruning strategy.")
-	} else {
-		fmt.Println("Using sequential pruning strategy.")
-	}
-
+	// Caricamento dello store (codice standard)
 	appStore := rootmulti.NewStore(appDB, log.NewLogger(os.Stderr), metrics.NewNoOpMetrics())
-
 	ver := rootmulti.GetLatestVersion(appDB)
 	storeNames := []string{}
 	if ver != 0 {
@@ -80,58 +73,82 @@ func PruneAppState(dataDir string, keepVersions uint64, noCompact, parallel bool
 		return err
 	}
 
+	// Calcola il numero totale di versioni da eliminare
 	versions := appStore.GetAllVersions()
-	if len(versions) == 0 {
-		fmt.Println("No versions found to prune.")
-		return nil
-	}
-
 	if uint64(len(versions)) <= keepVersions {
 		fmt.Println("No versions to prune.")
 		return nil
 	}
+	totalToPrune := int64(len(versions)) - int64(keepVersions)
 
-	numToPrune := len(versions) - int(keepVersions)
-	pruningHeight := int64(versions[numToPrune-1])
+	// === Logica di Esecuzione ===
 
-	fmt.Printf("Pruning all versions up to height %d...\n", pruningHeight)
-
-	startTime := time.Now()
-	if parallel {
-		if err := appStore.PruneStoresParallel(pruningHeight); err != nil {
-			return fmt.Errorf("error during parallel pruning: %w", err)
+	if noCompact {
+		// Modalità "Downtime Minimo": potatura logica veloce, senza compattazione.
+		fmt.Printf("Pruning %d versions logically in a single pass (compaction disabled)...\n", totalToPrune)
+		pruneFunc := appStore.PruneStores
+		if parallel {
+			pruneFunc = appStore.PruneStoresParallel
 		}
+		if err := pruneFunc(totalToPrune); err != nil {
+			return fmt.Errorf("error during logical pruning: %w", err)
+		}
+		fmt.Println("Logical pruning complete. Run without --no-compact to reclaim disk space.")
+
 	} else {
-		if err := appStore.PruneStores(pruningHeight); err != nil {
-			return fmt.Errorf("error during sequential pruning: %w", err)
+		// Modalità "Spazio Sicuro" (Default): ciclo a batch con compattazione.
+		fmt.Printf("Starting safe batched pruning for %d versions...\n", totalToPrune)
+		var prunedCount int64 = 0
+
+		for prunedCount < totalToPrune {
+			// 1. Controlla lo spazio prima di ogni batch
+			fmt.Println("Checking for available disk space...")
+			freeSpace, err := getFreeDiskSpace(dataDir)
+			if err != nil {
+				return fmt.Errorf("error checking disk space: %w", err)
+			}
+			if freeSpace < minFreeGB {
+				return fmt.Errorf("insufficient disk space to continue (%d GB available, %d GB required). Pruning halted safely. Pruned %d/%d versions.", freeSpace, minFreeGB, prunedCount, totalToPrune)
+			}
+
+			// 2. Definisci la dimensione del batch corrente
+			thisBatchSize := int64(batchSize)
+			if (totalToPrune - prunedCount) < thisBatchSize {
+				thisBatchSize = totalToPrune - prunedCount
+			}
+
+			// 3. Esegui il pruning logico per il batch
+			fmt.Printf("--- Pruning Batch %d / ~%d ---\n", (prunedCount/batchSize)+1, totalToPrune/batchSize+1)
+			fmt.Printf("Logically pruning %d versions... (Total progress: %d/%d)\n", thisBatchSize, prunedCount+thisBatchSize, totalToPrune)
+
+			pruneFunc := appStore.PruneStores
+			if parallel {
+				pruneFunc = appStore.PruneStoresParallel
+			}
+
+			startTime := time.Now()
+			if err := pruneFunc(thisBatchSize); err != nil {
+				return fmt.Errorf("error pruning batch: %w", err)
+			}
+			fmt.Printf("Logical pruning for batch finished in %s.\n", time.Since(startTime))
+
+			// 4. Esegui la compattazione per liberare spazio
+			fmt.Println("Compacting database to reclaim space... This may take a while.")
+			compactStartTime := time.Now()
+			if err := appDB.ForceCompact(nil, nil); err != nil {
+				return fmt.Errorf("error during compaction: %w", err)
+			}
+			fmt.Printf("Compaction for batch finished in %s.\n", time.Since(compactStartTime))
+
+			prunedCount += thisBatchSize
 		}
 	}
-	fmt.Printf("Logical pruning finished in %s.\n", time.Since(startTime))
 
-	if !noCompact {
-		fmt.Println("Checking for available disk space before compaction...")
-		freeSpace, err := getFreeDiskSpace(dataDir)
-		if err != nil {
-			return fmt.Errorf("error checking disk space: %w", err)
-		}
-		if freeSpace < minFreeGB {
-			return fmt.Errorf("insufficient disk space to start compaction (%d GB available, %d GB required). Run with --no-compact and try again later.", freeSpace, minFreeGB)
-		}
-
-		fmt.Println("Starting database compaction... This may take a very long time.")
-		compactStartTime := time.Now()
-		if err := appDB.ForceCompact(nil, nil); err != nil {
-			return fmt.Errorf("error during compaction: %w", err)
-		}
-		fmt.Printf("Compaction finished in %s.\n", time.Since(compactStartTime))
-	} else {
-		fmt.Println("Compaction was skipped as requested via --no-compact flag.")
-	}
-
+	fmt.Println("Application state pruning process finished successfully.")
 	return nil
 }
 
-// Firma della funzione aggiornata per usare uint64
+// PruneCmtData rimane invariato, la sua compattazione è generalmente veloce.
 func PruneCmtData(dataDir string, keepBlocks uint64) error {
 	o := opt.Options{
 		DisableSeeksCompaction: true,
