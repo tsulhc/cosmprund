@@ -52,6 +52,7 @@ Flags:
 - `app-batch-versions`: application versions to prune per store batch
 - `compact-every-batches`: compact application DB every N batches; `0` means once at the end
 - `min-free-gb`: minimum free disk GiB required before each application pruning batch
+- `skip-disk-check`: skip free disk checks before application pruning batches
 
 For short maintenance windows, use `--compact=false` to perform logical pruning only. Run again with compaction enabled when reclaiming disk space is required.
 

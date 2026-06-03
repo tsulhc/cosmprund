@@ -41,6 +41,7 @@ type PruneOptions struct {
 	AppBatchVersions    uint64
 	CompactEveryBatches uint64
 	MinFreeGB           uint64
+	SkipDiskCheck       bool
 }
 
 type appStoreContext struct {
@@ -213,6 +214,9 @@ func PruneAppState(dataDir string, opts PruneOptions) error {
 	if opts.Parallel {
 		fmt.Println("Parallel app pruning is disabled in store-by-store mode; pruning stores sequentially.")
 	}
+	if opts.SkipDiskCheck {
+		fmt.Println("Free disk checks disabled.")
+	}
 
 	if len(ctx.storeNames) == 0 {
 		fmt.Println("No application stores selected for pruning.")
@@ -236,12 +240,14 @@ func PruneAppState(dataDir string, opts PruneOptions) error {
 		prunedCount := 0
 
 		for prunedCount < totalToPrune {
-			freeSpace, err := getFreeDiskSpace(dataDir)
-			if err != nil {
-				return fmt.Errorf("error checking disk space: %w", err)
-			}
-			if freeSpace < opts.MinFreeGB {
-				return fmt.Errorf("insufficient disk space to continue (%d GB available, %d GB required). Pruning halted safely at store %s, progress %d/%d versions", freeSpace, opts.MinFreeGB, storeName, prunedCount, totalToPrune)
+			if !opts.SkipDiskCheck {
+				freeSpace, err := getFreeDiskSpace(dataDir)
+				if err != nil {
+					return fmt.Errorf("error checking disk space: %w", err)
+				}
+				if freeSpace < opts.MinFreeGB {
+					return fmt.Errorf("insufficient disk space to continue (%d GB available, %d GB required). Pruning halted safely at store %s, progress %d/%d versions", freeSpace, opts.MinFreeGB, storeName, prunedCount, totalToPrune)
+				}
 			}
 
 			thisBatchSize := int(opts.AppBatchVersions)

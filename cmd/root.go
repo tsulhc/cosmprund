@@ -28,6 +28,7 @@ var (
 	appBatchVersions    uint64
 	compactEveryBatches uint64
 	minFreeDiskGB       uint64
+	skipDiskCheck       bool
 	appName             = "cosmprund"
 )
 
@@ -104,6 +105,7 @@ func NewRootCmd() *cobra.Command {
 			pruneFlags.Uint64Var(&appBatchVersions, "app-batch-versions", 1000, "application versions to prune per store batch")
 			pruneFlags.Uint64Var(&compactEveryBatches, "compact-every-batches", 1, "compact application DB every N batches; 0 means once at the end")
 			pruneFlags.Uint64Var(&minFreeDiskGB, "min-free-gb", 20, "minimum free disk GiB required before each application pruning batch")
+			pruneFlags.BoolVar(&skipDiskCheck, "skip-disk-check", false, "skip free disk space checks before application pruning batches")
 		}},
 		{name: "inspect", set: func() {
 			inspectFlags.StringVar(&app, "app", "", "application label for logging, e.g. babylon")
@@ -135,6 +137,9 @@ func NewRootCmd() *cobra.Command {
 		panic(err)
 	}
 	if err := viper.BindPFlag("min-free-gb", pruneFlags.Lookup("min-free-gb")); err != nil {
+		panic(err)
+	}
+	if err := viper.BindPFlag("skip-disk-check", pruneFlags.Lookup("skip-disk-check")); err != nil {
 		panic(err)
 	}
 
@@ -189,6 +194,7 @@ func pruneOptionsFromFlags() PruneOptions {
 		AppBatchVersions:    appBatchVersions,
 		CompactEveryBatches: compactEveryBatches,
 		MinFreeGB:           minFreeDiskGB,
+		SkipDiskCheck:       skipDiskCheck,
 	}
 	opts.applyProfile()
 	return opts
