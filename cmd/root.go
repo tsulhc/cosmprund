@@ -14,15 +14,21 @@ var (
 )
 
 var (
-	cosmosSdk    bool
-	cometbft     bool
-	blocks       uint64
-	versions     uint64
-	compact      bool
-	parallel     bool
-	txIndex      bool
-	app          string
-	appName      = "cosmprund"
+	cosmosSdk           bool
+	cometbft            bool
+	blocks              uint64
+	versions            uint64
+	compact             bool
+	parallel            bool
+	txIndex             bool
+	app                 string
+	profile             string
+	includeStore        string
+	excludeStore        string
+	appBatchVersions    uint64
+	compactEveryBatches uint64
+	minFreeDiskGB       uint64
+	appName             = "cosmprund"
 )
 
 func NewRootCmd() *cobra.Command {
@@ -38,9 +44,10 @@ func NewRootCmd() *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			dataDir := args[0]
+			opts := pruneOptionsFromFlags()
 
 			if cosmosSdk {
-				if err := PruneAppState(dataDir, versions, compact, parallel, app); err != nil {
+				if err := PruneAppState(dataDir, opts); err != nil {
 					return err
 				}
 			}
@@ -61,45 +68,98 @@ func NewRootCmd() *cobra.Command {
 		},
 	}
 
-	rootCmd.AddCommand(pruneCmd)
+	inspectCmd := &cobra.Command{
+		Use:   "inspect <data_dir>",
+		Short: "Inspect database stores without pruning",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return InspectData(args[0], pruneOptionsFromFlags())
+		},
+	}
 
-	pruneCmd.PersistentFlags().Uint64VarP(&blocks, "blocks", "b", 10, "set the amount of blocks to keep")
-	if err := viper.BindPFlag("blocks", pruneCmd.PersistentFlags().Lookup("blocks")); err != nil {
+	rootCmd.AddCommand(pruneCmd, inspectCmd)
+
+	pruneFlags := pruneCmd.PersistentFlags()
+	inspectFlags := inspectCmd.PersistentFlags()
+
+	pruneFlags.Uint64VarP(&blocks, "blocks", "b", 10, "set the amount of blocks to keep")
+	if err := viper.BindPFlag("blocks", pruneFlags.Lookup("blocks")); err != nil {
 		panic(err)
 	}
 
-	pruneCmd.PersistentFlags().Uint64VarP(&versions, "versions", "v", 10, "set the amount of versions to keep in the application store")
-	if err := viper.BindPFlag("versions", pruneCmd.PersistentFlags().Lookup("versions")); err != nil {
+	pruneFlags.Uint64VarP(&versions, "versions", "v", 10, "set the amount of versions to keep in the application store")
+	if err := viper.BindPFlag("versions", pruneFlags.Lookup("versions")); err != nil {
 		panic(err)
 	}
 
-	pruneCmd.PersistentFlags().StringVar(&app, "app", "", "application label for logging, e.g. osmosis")
-	if err := viper.BindPFlag("app", pruneCmd.PersistentFlags().Lookup("app")); err != nil {
+	for _, flags := range []struct {
+		name string
+		set  func()
+	}{
+		{name: "prune", set: func() {
+			pruneFlags.StringVar(&app, "app", "", "application label for logging, e.g. babylon")
+			pruneFlags.StringVar(&profile, "profile", "", "pruning profile, e.g. babylon")
+			pruneFlags.StringVar(&includeStore, "include-store", "", "comma-separated application stores to prune")
+			pruneFlags.StringVar(&excludeStore, "exclude-store", "", "comma-separated application stores to skip")
+			pruneFlags.Uint64Var(&appBatchVersions, "app-batch-versions", 1000, "application versions to prune per store batch")
+			pruneFlags.Uint64Var(&compactEveryBatches, "compact-every-batches", 1, "compact application DB every N batches; 0 means once at the end")
+			pruneFlags.Uint64Var(&minFreeDiskGB, "min-free-gb", 20, "minimum free disk GiB required before each application pruning batch")
+		}},
+		{name: "inspect", set: func() {
+			inspectFlags.StringVar(&app, "app", "", "application label for logging, e.g. babylon")
+			inspectFlags.StringVar(&profile, "profile", "", "pruning profile, e.g. babylon")
+			inspectFlags.StringVar(&includeStore, "include-store", "", "comma-separated application stores to inspect")
+			inspectFlags.StringVar(&excludeStore, "exclude-store", "", "comma-separated application stores to skip")
+		}},
+	} {
+		_ = flags.name
+		flags.set()
+	}
+
+	if err := viper.BindPFlag("app", pruneFlags.Lookup("app")); err != nil {
+		panic(err)
+	}
+	if err := viper.BindPFlag("profile", pruneFlags.Lookup("profile")); err != nil {
+		panic(err)
+	}
+	if err := viper.BindPFlag("include-store", pruneFlags.Lookup("include-store")); err != nil {
+		panic(err)
+	}
+	if err := viper.BindPFlag("exclude-store", pruneFlags.Lookup("exclude-store")); err != nil {
+		panic(err)
+	}
+	if err := viper.BindPFlag("app-batch-versions", pruneFlags.Lookup("app-batch-versions")); err != nil {
+		panic(err)
+	}
+	if err := viper.BindPFlag("compact-every-batches", pruneFlags.Lookup("compact-every-batches")); err != nil {
+		panic(err)
+	}
+	if err := viper.BindPFlag("min-free-gb", pruneFlags.Lookup("min-free-gb")); err != nil {
 		panic(err)
 	}
 
-	pruneCmd.PersistentFlags().BoolVar(&cosmosSdk, "cosmos-sdk", true, "set to false if using only with cometbft")
-	if err := viper.BindPFlag("cosmos-sdk", pruneCmd.PersistentFlags().Lookup("cosmos-sdk")); err != nil {
+	pruneFlags.BoolVar(&cosmosSdk, "cosmos-sdk", true, "set to false if using only with cometbft")
+	if err := viper.BindPFlag("cosmos-sdk", pruneFlags.Lookup("cosmos-sdk")); err != nil {
 		panic(err)
 	}
 
-	pruneCmd.PersistentFlags().BoolVar(&cometbft, "cometbft", true, "set to false you dont want to prune cometbft data")
-	if err := viper.BindPFlag("cometbft", pruneCmd.PersistentFlags().Lookup("cometbft")); err != nil {
+	pruneFlags.BoolVar(&cometbft, "cometbft", true, "set to false you dont want to prune cometbft data")
+	if err := viper.BindPFlag("cometbft", pruneFlags.Lookup("cometbft")); err != nil {
 		panic(err)
 	}
 
-	pruneCmd.PersistentFlags().BoolVar(&compact, "compact", true, "compact databases after pruning")
-	if err := viper.BindPFlag("compact", pruneCmd.PersistentFlags().Lookup("compact")); err != nil {
+	pruneFlags.BoolVar(&compact, "compact", true, "compact databases after pruning")
+	if err := viper.BindPFlag("compact", pruneFlags.Lookup("compact")); err != nil {
 		panic(err)
 	}
 
-	pruneCmd.PersistentFlags().BoolVar(&parallel, "parallel", false, "Enable parallel pruning for the application state")
-	if err := viper.BindPFlag("parallel", pruneCmd.PersistentFlags().Lookup("parallel")); err != nil {
+	pruneFlags.BoolVar(&parallel, "parallel", false, "Enable parallel pruning for the application state")
+	if err := viper.BindPFlag("parallel", pruneFlags.Lookup("parallel")); err != nil {
 		panic(err)
 	}
 
-	pruneCmd.PersistentFlags().BoolVar(&txIndex, "tx-index", true, "prune tx_index.db and block indexes")
-	if err := viper.BindPFlag("tx-index", pruneCmd.PersistentFlags().Lookup("tx-index")); err != nil {
+	pruneFlags.BoolVar(&txIndex, "tx-index", true, "prune tx_index.db and block indexes")
+	if err := viper.BindPFlag("tx-index", pruneFlags.Lookup("tx-index")); err != nil {
 		panic(err)
 	}
 
@@ -113,6 +173,25 @@ func NewRootCmd() *cobra.Command {
 	rootCmd.AddCommand(versionCmd)
 
 	return rootCmd
+}
+
+func pruneOptionsFromFlags() PruneOptions {
+	opts := PruneOptions{
+		App:                 app,
+		Profile:             profile,
+		KeepBlocks:          blocks,
+		KeepVersions:        versions,
+		Compact:             compact,
+		Parallel:            parallel,
+		TxIndex:             txIndex,
+		IncludeStores:       csvList(includeStore),
+		ExcludeStores:       csvList(excludeStore),
+		AppBatchVersions:    appBatchVersions,
+		CompactEveryBatches: compactEveryBatches,
+		MinFreeGB:           minFreeDiskGB,
+	}
+	opts.applyProfile()
+	return opts
 }
 
 func Execute() {

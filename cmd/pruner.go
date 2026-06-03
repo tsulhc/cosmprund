@@ -4,6 +4,8 @@ import (
 	"encoding/binary"
 	"fmt"
 	"os"
+	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -26,6 +28,69 @@ const (
 	minFreeGB = 20
 )
 
+type PruneOptions struct {
+	App                 string
+	Profile             string
+	KeepBlocks          uint64
+	KeepVersions        uint64
+	Compact             bool
+	Parallel            bool
+	TxIndex             bool
+	IncludeStores       []string
+	ExcludeStores       []string
+	AppBatchVersions    uint64
+	CompactEveryBatches uint64
+	MinFreeGB           uint64
+}
+
+type appStoreContext struct {
+	db         *db.GoLevelDB
+	store      *rootmulti.Store
+	storeNames []string
+	latest     int64
+}
+
+func (opts *PruneOptions) applyProfile() {
+	if strings.EqualFold(opts.Profile, "babylon") || strings.EqualFold(opts.App, "babylon") {
+		if opts.App == "" {
+			opts.App = "babylon"
+		}
+		if opts.AppBatchVersions == batchSize {
+			opts.AppBatchVersions = 50
+		}
+		if opts.CompactEveryBatches == 1 {
+			opts.CompactEveryBatches = 0
+		}
+		if opts.MinFreeGB == minFreeGB {
+			opts.MinFreeGB = 100
+		}
+	}
+}
+
+func csvList(value string) []string {
+	if value == "" {
+		return nil
+	}
+
+	parts := strings.Split(value, ",")
+	items := make([]string, 0, len(parts))
+	for _, part := range parts {
+		item := strings.TrimSpace(part)
+		if item != "" {
+			items = append(items, item)
+		}
+	}
+	return items
+}
+
+func stringSet(items []string) map[string]bool {
+	set := make(map[string]bool, len(items))
+	for _, item := range items {
+		set[item] = true
+	}
+	return set
+}
+
 func getFreeDiskSpace(path string) (uint64, error) {
 	var stat syscall.Statfs_t
 	if err := syscall.Statfs(path, &stat); err != nil {
@@ -34,32 +99,24 @@ func getFreeDiskSpace(path string) (uint64, error) {
 	return (stat.Bavail * uint64(stat.Bsize)) / (1024 * 1024 * 1024), nil
 }
 
-func PruneAppState(dataDir string, keepVersions uint64, compact, parallel bool, app string) error {
-	if keepVersions == 0 {
-		return fmt.Errorf("versions must be greater than 0")
-	}
-
+func loadAppStore(dataDir string, opts PruneOptions) (*appStoreContext, error) {
 	o := opt.Options{
 		DisableSeeksCompaction: true,
 	}
 
 	appDB, err := db.NewGoLevelDBWithOpts("application", dataDir, &o)
 	if err != nil {
-		return err
-	}
-	defer appDB.Close()
-
-	if app != "" {
-		fmt.Println("Application label:", app)
+		return nil, err
 	}
 
 	appStore := rootmulti.NewStore(appDB, log.NewLogger(os.Stderr), metrics.NewNoOpMetrics())
-	ver := rootmulti.GetLatestVersion(appDB)
+	latest := rootmulti.GetLatestVersion(appDB)
 	storeNames := []string{}
-	if ver != 0 {
-		cInfo, err := appStore.GetCommitInfo(ver)
+	if latest != 0 {
+		cInfo, err := appStore.GetCommitInfo(latest)
 		if err != nil {
-			return err
+			appDB.Close()
+			return nil, err
 		}
 		for _, storeInfo := range cInfo.StoreInfos {
 			if len(storeInfo.CommitId.Hash) > 0 {
@@ -69,77 +126,219 @@ func PruneAppState(dataDir string, keepVersions uint64, compact, parallel bool, 
 			}
 		}
 	}
+
+	storeNames = filterStoreNames(storeNames, opts.IncludeStores, opts.ExcludeStores)
 	keys := types.NewKVStoreKeys(storeNames...)
 	for _, value := range keys {
 		appStore.MountStoreWithDB(value, types.StoreTypeIAVL, nil)
 	}
 	if err := appStore.LoadLatestVersion(); err != nil {
-		return err
+		appDB.Close()
+		return nil, err
 	}
 
-	allVersions := appStore.GetAllVersions()
-	if uint64(len(allVersions)) <= keepVersions {
-		fmt.Printf("No application versions to prune. found=%d keep=%d\n", len(allVersions), keepVersions)
+	return &appStoreContext{
+		db:         appDB,
+		store:      appStore,
+		storeNames: storeNames,
+		latest:     latest,
+	}, nil
+}
+
+func filterStoreNames(storeNames []string, includeStores, excludeStores []string) []string {
+	include := stringSet(includeStores)
+	exclude := stringSet(excludeStores)
+	filtered := make([]string, 0, len(storeNames))
+
+	for _, storeName := range storeNames {
+		if len(include) > 0 && !include[storeName] {
+			continue
+		}
+		if exclude[storeName] {
+			continue
+		}
+		filtered = append(filtered, storeName)
+	}
+
+	sort.Strings(filtered)
+	return filtered
+}
+
+func dirSize(path string) uint64 {
+	var size uint64
+	_ = filepath.WalkDir(path, func(_ string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil
+		}
+		info, err := d.Info()
+		if err == nil && info.Size() > 0 {
+			size += uint64(info.Size())
+		}
+		return nil
+	})
+	return size
+}
+
+func formatBytes(size uint64) string {
+	units := []string{"B", "KiB", "MiB", "GiB", "TiB"}
+	value := float64(size)
+	unit := 0
+	for value >= 1024 && unit < len(units)-1 {
+		value /= 1024
+		unit++
+	}
+	return fmt.Sprintf("%.2f %s", value, units[unit])
+}
+
+func PruneAppState(dataDir string, opts PruneOptions) error {
+	if opts.KeepVersions == 0 {
+		return fmt.Errorf("versions must be greater than 0")
+	}
+	if opts.AppBatchVersions == 0 {
+		return fmt.Errorf("app-batch-versions must be greater than 0")
+	}
+
+	ctx, err := loadAppStore(dataDir, opts)
+	if err != nil {
+		return err
+	}
+	defer ctx.db.Close()
+
+	if opts.App != "" {
+		fmt.Println("Application label:", opts.App)
+	}
+	if opts.Profile != "" {
+		fmt.Println("Profile:", opts.Profile)
+	}
+	if opts.Parallel {
+		fmt.Println("Parallel app pruning is disabled in store-by-store mode; pruning stores sequentially.")
+	}
+
+	if len(ctx.storeNames) == 0 {
+		fmt.Println("No application stores selected for pruning.")
 		return nil
 	}
 
-	totalToPrune := len(allVersions) - int(keepVersions)
-	finalPruneHeight := int64(allVersions[totalToPrune-1])
-	fmt.Printf("Application versions found=%d keep=%d prune_count=%d prune_to=%d\n", len(allVersions), keepVersions, totalToPrune, finalPruneHeight)
-
-	pruneFunc := appStore.PruneStores
-	if parallel {
-		pruneFunc = appStore.PruneStoresParallel
+	allVersions := ctx.store.GetAllVersions()
+	if uint64(len(allVersions)) <= opts.KeepVersions {
+		fmt.Printf("No application versions to prune. found=%d keep=%d\n", len(allVersions), opts.KeepVersions)
+		return nil
 	}
 
-	if !compact {
-		fmt.Printf("Pruning application versions logically to %d (compaction disabled)...\n", finalPruneHeight)
-		if err := pruneFunc(finalPruneHeight); err != nil {
-			return fmt.Errorf("error during logical pruning: %w", err)
-		}
-		fmt.Println("Logical pruning complete. Run with --compact=true to reclaim disk space.")
+	totalToPrune := len(allVersions) - int(opts.KeepVersions)
+	finalPruneHeight := int64(allVersions[totalToPrune-1])
+	fmt.Printf("Application versions found=%d keep=%d prune_count=%d prune_to=%d stores=%d\n", len(allVersions), opts.KeepVersions, totalToPrune, finalPruneHeight, len(ctx.storeNames))
 
-	} else {
-		fmt.Printf("Starting safe batched application pruning for %d versions...\n", totalToPrune)
+	batchNumber := uint64(0)
+	for _, storeName := range ctx.storeNames {
+		storeStart := time.Now()
+		fmt.Printf("=== Pruning application store %s ===\n", storeName)
 		prunedCount := 0
 
 		for prunedCount < totalToPrune {
-			fmt.Println("Checking for available disk space...")
 			freeSpace, err := getFreeDiskSpace(dataDir)
 			if err != nil {
 				return fmt.Errorf("error checking disk space: %w", err)
 			}
-			if freeSpace < minFreeGB {
-				return fmt.Errorf("insufficient disk space to continue (%d GB available, %d GB required). Pruning halted safely. Pruned %d/%d versions.", freeSpace, minFreeGB, prunedCount, totalToPrune)
+			if freeSpace < opts.MinFreeGB {
+				return fmt.Errorf("insufficient disk space to continue (%d GB available, %d GB required). Pruning halted safely at store %s, progress %d/%d versions", freeSpace, opts.MinFreeGB, storeName, prunedCount, totalToPrune)
 			}
 
-			thisBatchSize := batchSize
+			thisBatchSize := int(opts.AppBatchVersions)
 			if totalToPrune-prunedCount < thisBatchSize {
 				thisBatchSize = totalToPrune - prunedCount
 			}
 			batchPruneHeight := int64(allVersions[prunedCount+thisBatchSize-1])
 
-			fmt.Printf("--- Pruning Batch %d / ~%d ---\n", (prunedCount/batchSize)+1, totalToPrune/batchSize+1)
-			fmt.Printf("Logically pruning to version %d... (Total progress: %d/%d)\n", batchPruneHeight, prunedCount+thisBatchSize, totalToPrune)
-
+			batchNumber++
+			fmt.Printf("Store %s batch %d: pruning to version %d (%d/%d)\n", storeName, batchNumber, batchPruneHeight, prunedCount+thisBatchSize, totalToPrune)
 			startTime := time.Now()
-			if err := pruneFunc(batchPruneHeight); err != nil {
-				return fmt.Errorf("error pruning batch: %w", err)
+			if err := ctx.store.PruneStore(storeName, batchPruneHeight); err != nil {
+				return fmt.Errorf("error pruning store %s to version %d: %w", storeName, batchPruneHeight, err)
 			}
-			fmt.Printf("Logical pruning for batch finished in %s.\n", time.Since(startTime))
-
-			fmt.Println("Compacting database to reclaim space... This may take a while.")
-			compactStartTime := time.Now()
-			if err := appDB.ForceCompact(nil, nil); err != nil {
-				return fmt.Errorf("error during compaction: %w", err)
-			}
-			fmt.Printf("Compaction for batch finished in %s.\n", time.Since(compactStartTime))
+			fmt.Printf("Store %s batch %d finished in %s.\n", storeName, batchNumber, time.Since(startTime))
 
 			prunedCount += thisBatchSize
+			if opts.Compact && opts.CompactEveryBatches > 0 && batchNumber%opts.CompactEveryBatches == 0 {
+				if err := compactApplicationDB(ctx.db); err != nil {
+					return err
+				}
+			}
 		}
+		fmt.Printf("Store %s pruning finished in %s.\n", storeName, time.Since(storeStart))
+	}
+
+	if opts.Compact && opts.CompactEveryBatches == 0 {
+		if err := compactApplicationDB(ctx.db); err != nil {
+			return err
+		}
+	} else if !opts.Compact {
+		fmt.Println("Logical pruning complete. Run with --compact=true to reclaim disk space.")
 	}
 
 	fmt.Println("Application state pruning process finished successfully.")
+	return nil
+}
+
+func compactApplicationDB(appDB *db.GoLevelDB) error {
+	fmt.Println("Compacting application database to reclaim space... This may take a while.")
+	compactStartTime := time.Now()
+	if err := appDB.ForceCompact(nil, nil); err != nil {
+		return fmt.Errorf("error during application compaction: %w", err)
+	}
+	fmt.Printf("Application compaction finished in %s.\n", time.Since(compactStartTime))
+	return nil
+}
+
+func InspectData(dataDir string, opts PruneOptions) error {
+	opts.applyProfile()
+	freeSpace, err := getFreeDiskSpace(dataDir)
+	if err != nil {
+		return fmt.Errorf("error checking disk space: %w", err)
+	}
+
+	fmt.Println("cosmprund inspect")
+	fmt.Println("Data directory:", dataDir)
+	if opts.App != "" {
+		fmt.Println("Application label:", opts.App)
+	}
+	if opts.Profile != "" {
+		fmt.Println("Profile:", opts.Profile)
+	}
+	fmt.Printf("Free disk: %d GiB\n", freeSpace)
+
+	for _, name := range []string{"application", "blockstore", "state", "tx_index"} {
+		path := filepath.Join(dataDir, name+".db")
+		fmt.Printf("DB %-12s %s\n", name, formatBytes(dirSize(path)))
+	}
+
+	blockStoreDB, err := dbm.NewGoLevelDBWithOpts("blockstore", dataDir, &opt.Options{DisableSeeksCompaction: true})
+	if err == nil {
+		blockStore := cmtstore.NewBlockStore(blockStoreDB)
+		fmt.Printf("CometBFT block base=%d height=%d\n", blockStore.Base(), blockStore.Height())
+		blockStore.Close()
+	}
+
+	ctx, err := loadAppStore(dataDir, opts)
+	if err != nil {
+		return err
+	}
+	defer ctx.db.Close()
+
+	fmt.Printf("Application latest version=%d selected_stores=%d\n", ctx.latest, len(ctx.storeNames))
+	for _, storeName := range ctx.storeNames {
+		versions, err := ctx.store.GetStoreVersions(storeName)
+		if err != nil {
+			fmt.Printf("Store %-24s error=%s\n", storeName, err)
+			continue
+		}
+		if len(versions) == 0 {
+			fmt.Printf("Store %-24s versions=0\n", storeName)
+			continue
+		}
+		fmt.Printf("Store %-24s versions=%d first=%d latest=%d\n", storeName, len(versions), versions[0], versions[len(versions)-1])
+	}
+
 	return nil
 }
 

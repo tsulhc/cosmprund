@@ -142,6 +142,46 @@ func (rs *Store) PruneStoresParallel(pruningHeight int64) error {
 	return nil
 }
 
+// PruneStore prunes one named IAVL substore up to the requested height.
+func (rs *Store) PruneStore(storeName string, pruningHeight int64) error {
+	if pruningHeight <= 0 {
+		rs.logger.Debug("store pruning skipped, height is less than or equal to 0", "store", storeName)
+		return nil
+	}
+
+	store := rs.GetStoreByName(storeName)
+	if store == nil {
+		return fmt.Errorf("store %s not found", storeName)
+	}
+
+	iavlStore, ok := store.(*iavl.Store)
+	if !ok {
+		return fmt.Errorf("store %s is not an IAVL store", storeName)
+	}
+
+	err := iavlStore.DeleteVersionsTo(pruningHeight)
+	if err != nil && !errors.Is(err, iavltree.ErrVersionDoesNotExist) {
+		return err
+	}
+
+	return nil
+}
+
+// GetStoreVersions returns all saved IAVL versions for one named substore.
+func (rs *Store) GetStoreVersions(storeName string) ([]int, error) {
+	store := rs.GetStoreByName(storeName)
+	if store == nil {
+		return nil, fmt.Errorf("store %s not found", storeName)
+	}
+
+	iavlStore, ok := store.(*iavl.Store)
+	if !ok {
+		return nil, fmt.Errorf("store %s is not an IAVL store", storeName)
+	}
+
+	return iavlStore.GetAllVersions(), nil
+}
+
 func (rs *Store) DeleteCommitInfo(version uint64) error {
 	key := SSUInt64(version)
 	return rs.db.Delete(key)
