@@ -88,9 +88,7 @@ func SSUInt64(i uint64) []byte {
 	return b
 }
 
-
-// PruneStoresParallel esegue il pruning delle versioni in parallelo per ogni sub-store.
-// VERSIONE FINALE CORRETTA
+// PruneStoresParallel prunes IAVL substores concurrently up to the requested height.
 func (rs *Store) PruneStoresParallel(pruningHeight int64) error {
 	if pruningHeight <= 0 {
 		rs.logger.Debug("parallel pruning skipped, height is less than or equal to 0")
@@ -103,7 +101,6 @@ func (rs *Store) PruneStoresParallel(pruningHeight int64) error {
 	errs := make(chan error, len(rs.stores))
 
 	for key, store := range rs.stores {
-		// Controlliamo il tipo di store prima di avviare la goroutine
 		if store.GetStoreType() != types.StoreTypeIAVL {
 			continue
 		}
@@ -113,27 +110,19 @@ func (rs *Store) PruneStoresParallel(pruningHeight int64) error {
 		go func(storeKey types.StoreKey, s types.Store) {
 			defer wg.Done()
 
-			// Replicando la logica di unwrapping/accesso
 			kvStore := rs.GetCommitKVStore(storeKey)
 
-			// Facciamo l'assertion a *iavl.Store come nella funzione originale
 			iavlStore, ok := kvStore.(*iavl.Store)
 			if !ok {
-				// Questo non dovrebbe accadere se GetStoreType() è IAVL, ma è un controllo sicuro.
 				errs <- fmt.Errorf("store %s is not of type *iavl.Store after GetCommitKVStore", storeKey.Name())
 				return
 			}
 
-			// Usiamo il metodo corretto: DeleteVersionsTo
 			err := iavlStore.DeleteVersionsTo(pruningHeight)
 			if err != nil {
-				// Controlliamo l'errore specifico come nella funzione originale
 				if errors.Is(err, iavltree.ErrVersionDoesNotExist) {
-					// Questo non è un errore fatale, ma potremmo volerlo loggare.
-					// In un contesto parallelo, potremmo semplicemente ignorarlo.
 					return
 				}
-				// Invia l'errore al canale
 				errs <- fmt.Errorf("failed to parallel prune store %s: %w", storeKey.Name(), err)
 			}
 		}(key, store)
@@ -142,11 +131,10 @@ func (rs *Store) PruneStoresParallel(pruningHeight int64) error {
 	wg.Wait()
 	close(errs)
 
-	// Controlla se una delle goroutine ha riportato un errore fatale
 	for err := range errs {
 		if err != nil {
 			rs.logger.Error("an error occurred during parallel pruning", "err", err)
-			return err // Restituisce il primo errore incontrato
+			return err
 		}
 	}
 
@@ -154,10 +142,7 @@ func (rs *Store) PruneStoresParallel(pruningHeight int64) error {
 	return nil
 }
 
-// Assicurati che anche questa funzione esista nel file e abbia la firma corretta.
-// In base agli errori, si aspetta un uint64.
 func (rs *Store) DeleteCommitInfo(version uint64) error {
-	// CORREZIONE: Usiamo la nostra funzione helper SSUInt64
 	key := SSUInt64(version)
 	return rs.db.Delete(key)
 }
@@ -795,10 +780,11 @@ func (rs *Store) PruneStores(pruningHeight int64) (err error) {
 		}
 
 		if errors.Is(err, iavltree.ErrVersionDoesNotExist) {
-			return err
+			continue
 		}
 
 		rs.logger.Error("failed to prune store", "key", key, "err", err)
+		return err
 	}
 	return nil
 }

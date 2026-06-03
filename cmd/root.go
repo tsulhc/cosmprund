@@ -16,10 +16,12 @@ var (
 var (
 	cosmosSdk    bool
 	cometbft     bool
-	keepBlocks   uint64
-	keepVersions uint64
-	noCompact    bool
+	blocks       uint64
+	versions     uint64
+	compact      bool
 	parallel     bool
+	txIndex      bool
+	app          string
 	appName      = "cosmprund"
 )
 
@@ -38,13 +40,19 @@ func NewRootCmd() *cobra.Command {
 			dataDir := args[0]
 
 			if cosmosSdk {
-				if err := PruneAppState(dataDir, keepVersions, noCompact, parallel); err != nil {
+				if err := PruneAppState(dataDir, versions, compact, parallel, app); err != nil {
 					return err
 				}
 			}
 
 			if cometbft {
-				if err := PruneCmtData(dataDir, keepBlocks); err != nil {
+				if err := PruneCmtData(dataDir, blocks, compact); err != nil {
+					return err
+				}
+			}
+
+			if txIndex {
+				if err := PruneTxIndex(dataDir, blocks, compact); err != nil {
 					return err
 				}
 			}
@@ -55,13 +63,18 @@ func NewRootCmd() *cobra.Command {
 
 	rootCmd.AddCommand(pruneCmd)
 
-	pruneCmd.PersistentFlags().Uint64VarP(&keepBlocks, "keep-blocks", "b", 10, "set the amount of blocks to keep")
-	if err := viper.BindPFlag("keep-blocks", pruneCmd.PersistentFlags().Lookup("keep-blocks")); err != nil {
+	pruneCmd.PersistentFlags().Uint64VarP(&blocks, "blocks", "b", 10, "set the amount of blocks to keep")
+	if err := viper.BindPFlag("blocks", pruneCmd.PersistentFlags().Lookup("blocks")); err != nil {
 		panic(err)
 	}
 
-	pruneCmd.PersistentFlags().Uint64VarP(&keepVersions, "keep-versions", "v", 10, "set the amount of versions to keep in the application store")
-	if err := viper.BindPFlag("keep-versions", pruneCmd.PersistentFlags().Lookup("keep-versions")); err != nil {
+	pruneCmd.PersistentFlags().Uint64VarP(&versions, "versions", "v", 10, "set the amount of versions to keep in the application store")
+	if err := viper.BindPFlag("versions", pruneCmd.PersistentFlags().Lookup("versions")); err != nil {
+		panic(err)
+	}
+
+	pruneCmd.PersistentFlags().StringVar(&app, "app", "", "application label for logging, e.g. osmosis")
+	if err := viper.BindPFlag("app", pruneCmd.PersistentFlags().Lookup("app")); err != nil {
 		panic(err)
 	}
 
@@ -75,14 +88,18 @@ func NewRootCmd() *cobra.Command {
 		panic(err)
 	}
 
-	// Riscrivi queste righe a mano nel tuo editor per sicurezza
-	pruneCmd.PersistentFlags().BoolVar(&noCompact, "no-compact", false, "Disable database compaction after pruning application state")
-	if err := viper.BindPFlag("no-compact", pruneCmd.PersistentFlags().Lookup("no-compact")); err != nil {
+	pruneCmd.PersistentFlags().BoolVar(&compact, "compact", true, "compact databases after pruning")
+	if err := viper.BindPFlag("compact", pruneCmd.PersistentFlags().Lookup("compact")); err != nil {
 		panic(err)
 	}
 
 	pruneCmd.PersistentFlags().BoolVar(&parallel, "parallel", false, "Enable parallel pruning for the application state")
 	if err := viper.BindPFlag("parallel", pruneCmd.PersistentFlags().Lookup("parallel")); err != nil {
+		panic(err)
+	}
+
+	pruneCmd.PersistentFlags().BoolVar(&txIndex, "tx-index", true, "prune tx_index.db and block indexes")
+	if err := viper.BindPFlag("tx-index", pruneCmd.PersistentFlags().Lookup("tx-index")); err != nil {
 		panic(err)
 	}
 

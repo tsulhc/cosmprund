@@ -1,8 +1,8 @@
 # Cosmos-Pruner
 
-The goal of this project is to be able to prune a cometbft data base of blocks and an Cosmos-sdk application DB of all but the last X versions. This will allow people to not have to state sync every x days.
+The goal of this project is to prune a CometBFT database, Cosmos SDK application state, and tx indexes while keeping the last N blocks and application versions.
 
-This tool works with a subset of modules.
+Application stores are detected from the latest commit info, so chain-specific stores such as Osmosis modules are mounted automatically when they are present in the database.
 
 ## WARNING
 
@@ -26,13 +26,19 @@ make build
 # stop daemon/cosmovisor
 sudo systemctl stop cosmovisor
 
-# run cosmprund 
-./build/cosmprund prune ~/.gaiad/data --cosmos-sdk=false
+# run cosmprund
+./build/cosmprund prune ~/.gaiad/data --blocks 10000 --versions 10000 --app cosmoshub
 ```
 
 Flags: 
 
-- `blocks`: amount of blocks to keep on the node (Default 10)
-- `versions`: amount of app state versions to keep on the node (Default 10)
-- `cosmos-sdk`: If pruning a non cosmos-sdk chain, like Nomic, you only want to use cometbft pruning or if you want to only prune cometbft block & state as this is generally large on machines(Default true)
-- `cometbft`: If the user wants to only prune application data they can disable pruning of cometbft data. (Default true)
+- `blocks`: amount of CometBFT blocks to keep on the node (default 10)
+- `versions`: amount of application state versions to keep on the node (default 10)
+- `app`: application label used for logging, for example `osmosis`
+- `cosmos-sdk`: set to false to skip application state pruning (default true)
+- `cometbft`: set to false to skip CometBFT block/state pruning (default true)
+- `tx-index`: prune `tx_index.db` and block indexes (default true)
+- `compact`: compact databases after pruning (default true)
+- `parallel`: prune application substores concurrently (default false)
+
+For short maintenance windows, use `--compact=false` to perform logical pruning only. Run again with compaction enabled when reclaiming disk space is required.
