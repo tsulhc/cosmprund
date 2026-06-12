@@ -161,7 +161,6 @@ func filterStoreNames(storeNames []string, includeStores, excludeStores []string
 		filtered = append(filtered, storeName)
 	}
 
-	sort.Strings(filtered)
 	return filtered
 }
 
@@ -222,6 +221,36 @@ func PruneAppState(dataDir string, opts PruneOptions) error {
 		fmt.Println("No application stores selected for pruning.")
 		return nil
 	}
+
+	storeWeights := make([]struct {
+		name  string
+		count int
+	}, len(ctx.storeNames))
+
+	for i, storeName := range ctx.storeNames {
+		versions, err := ctx.store.GetStoreVersions(storeName)
+		count := 0
+		if err == nil {
+			count = len(versions)
+		}
+		storeWeights[i] = struct {
+			name  string
+			count int
+		}{storeName, count}
+	}
+
+	sort.Slice(storeWeights, func(i, j int) bool {
+		if storeWeights[i].count != storeWeights[j].count {
+			return storeWeights[i].count > storeWeights[j].count
+		}
+		return storeWeights[i].name < storeWeights[j].name
+	})
+
+	sortedStoreNames := make([]string, len(storeWeights))
+	for i, sw := range storeWeights {
+		sortedStoreNames[i] = sw.name
+	}
+	ctx.storeNames = sortedStoreNames
 
 	allVersions := ctx.store.GetAllVersions()
 	if uint64(len(allVersions)) <= opts.KeepVersions {

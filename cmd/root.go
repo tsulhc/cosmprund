@@ -3,6 +3,8 @@ package cmd
 import (
 	"fmt"
 	"os"
+	"path/filepath"
+	"sort"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -32,6 +34,12 @@ var (
 	appName             = "cosmprund"
 )
 
+type pruneTask struct {
+	name     string
+	dbSize   uint64
+	run      func() error
+}
+
 func NewRootCmd() *cobra.Command {
 	var rootCmd = &cobra.Command{
 		Use:     "cosmprund",
@@ -47,20 +55,51 @@ func NewRootCmd() *cobra.Command {
 			dataDir := args[0]
 			opts := pruneOptionsFromFlags()
 
+			var tasks []pruneTask
+
 			if cosmosSdk {
-				if err := PruneAppState(dataDir, opts); err != nil {
-					return err
-				}
+				tasks = append(tasks, pruneTask{
+					name:   "Application state",
+					dbSize: dirSize(filepath.Join(dataDir, "application.db")),
+					run: func() error {
+						return PruneAppState(dataDir, opts)
+					},
+				})
 			}
 
 			if cometbft {
-				if err := PruneCmtData(dataDir, blocks, compact); err != nil {
-					return err
-				}
+				blockSize := dirSize(filepath.Join(dataDir, "blockstore.db"))
+				stateSize := dirSize(filepath.Join(dataDir, "state.db"))
+				tasks = append(tasks, pruneTask{
+					name:   "CometBFT blockstore + state",
+					dbSize: blockSize + stateSize,
+					run: func() error {
+						return PruneCmtData(dataDir, blocks, compact)
+					},
+				})
 			}
 
 			if txIndex {
-				if err := PruneTxIndex(dataDir, blocks, compact); err != nil {
+				tasks = append(tasks, pruneTask{
+					name:   "Transaction index",
+					dbSize: dirSize(filepath.Join(dataDir, "tx_index.db")),
+					run: func() error {
+						return PruneTxIndex(dataDir, blocks, compact)
+					},
+				})
+			}
+
+			sort.Slice(tasks, func(i, j int) bool {
+				return tasks[i].dbSize > tasks[j].dbSize
+			})
+
+			fmt.Println("Pruning order (largest databases first):")
+			for i, t := range tasks {
+				fmt.Printf("  %d. %s (%s)\n", i+1, t.name, formatBytes(t.dbSize))
+			}
+
+			for _, t := range tasks {
+				if err := t.run(); err != nil {
 					return err
 				}
 			}
