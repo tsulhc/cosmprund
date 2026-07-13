@@ -25,7 +25,6 @@ import (
 
 const (
 	batchSize = 1000
-	minFreeGB = 20
 )
 
 type PruneOptions struct {
@@ -42,6 +41,10 @@ type PruneOptions struct {
 	CompactEveryBatches uint64
 	MinFreeGB           uint64
 	SkipDiskCheck       bool
+
+	ExplicitAppBatchVersions    bool
+	ExplicitCompactEveryBatches bool
+	ExplicitMinFreeGB           bool
 }
 
 type appStoreContext struct {
@@ -56,13 +59,13 @@ func (opts *PruneOptions) applyProfile() {
 		if opts.App == "" {
 			opts.App = "babylon"
 		}
-		if opts.AppBatchVersions == batchSize {
+		if !opts.ExplicitAppBatchVersions {
 			opts.AppBatchVersions = 50
 		}
-		if opts.CompactEveryBatches == 1 {
+		if !opts.ExplicitCompactEveryBatches {
 			opts.CompactEveryBatches = 0
 		}
-		if opts.MinFreeGB == minFreeGB {
+		if !opts.ExplicitMinFreeGB {
 			opts.MinFreeGB = 100
 		}
 	}
@@ -210,6 +213,10 @@ func PruneAppState(dataDir string, opts PruneOptions) error {
 	if opts.Profile != "" {
 		fmt.Println("Profile:", opts.Profile)
 	}
+	fmt.Printf("Effective app batch versions: %d\n", opts.AppBatchVersions)
+	fmt.Printf("Effective compact every batches: %d\n", opts.CompactEveryBatches)
+	fmt.Printf("Effective min free GiB: %d\n", opts.MinFreeGB)
+	fmt.Printf("Disk check skipped: %t\n", opts.SkipDiskCheck)
 	if opts.Parallel {
 		fmt.Println("Parallel app pruning is disabled in store-by-store mode; pruning stores sequentially.")
 	}
@@ -326,7 +333,6 @@ func compactApplicationDB(appDB *db.GoLevelDB) error {
 }
 
 func InspectData(dataDir string, opts PruneOptions) error {
-	opts.applyProfile()
 	freeSpace, err := getFreeDiskSpace(dataDir)
 	if err != nil {
 		return fmt.Errorf("error checking disk space: %w", err)

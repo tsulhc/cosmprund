@@ -53,7 +53,7 @@ func NewRootCmd() *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			dataDir := args[0]
-			opts := pruneOptionsFromFlags()
+			opts := pruneOptionsFromFlags(cmd)
 
 			var tasks []pruneTask
 
@@ -113,7 +113,7 @@ func NewRootCmd() *cobra.Command {
 		Short: "Inspect database stores without pruning",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return InspectData(args[0], pruneOptionsFromFlags())
+			return InspectData(args[0], pruneOptionsFromFlags(cmd))
 		},
 	}
 
@@ -219,7 +219,7 @@ func NewRootCmd() *cobra.Command {
 	return rootCmd
 }
 
-func pruneOptionsFromFlags() PruneOptions {
+func pruneOptionsFromFlags(cmd *cobra.Command) PruneOptions {
 	opts := PruneOptions{
 		App:                 app,
 		Profile:             profile,
@@ -235,6 +235,20 @@ func pruneOptionsFromFlags() PruneOptions {
 		MinFreeGB:           minFreeDiskGB,
 		SkipDiskCheck:       skipDiskCheck,
 	}
+
+	if cmd != nil {
+		flags := cmd.Flags()
+		if f := flags.Lookup("app-batch-versions"); f != nil {
+			opts.ExplicitAppBatchVersions = f.Changed
+		}
+		if f := flags.Lookup("compact-every-batches"); f != nil {
+			opts.ExplicitCompactEveryBatches = f.Changed
+		}
+		if f := flags.Lookup("min-free-gb"); f != nil {
+			opts.ExplicitMinFreeGB = f.Changed
+		}
+	}
+
 	opts.applyProfile()
 	return opts
 }
